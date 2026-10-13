@@ -5,6 +5,7 @@ import time
 from collections import defaultdict, deque
 from datetime import timedelta
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -18,6 +19,7 @@ DB = os.getenv("DATABASE_PATH", "moderation.db")
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))
 BAD_WORDS = {x.strip().lower() for x in os.getenv("BAD_WORDS", "").split(",") if x.strip()}
 LINKS = re.compile(r"https?://|www\\.", re.I)
+CUSTOM_EMOJI = re.compile(r"<(a?):([A-Za-z0-9_~]+):(\\d+)>")
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
@@ -165,6 +167,35 @@ async def setlog(i: discord.Interaction, channel: discord.TextChannel):
 @app_commands.checks.has_permissions(administrator=True)
 async def config(i: discord.Interaction, anti_links: bool=False, anti_spam: bool=True):
     con=database(); con.execute("INSERT INTO settings(guild,anti_links,anti_spam) VALUES(?,?,?) ON CONFLICT(guild) DO UPDATE SET anti_links=excluded.anti_links, anti_spam=excluded.anti_spam", (i.guild.id,int(anti_links),int(anti_spam))); con.commit(); con.close(); await i.response.send_message(f"Anti-links: {anti_links} | Anti-spam: {anti_spam}")
+
+
+@bot.tree.command(name="steal", description="Copy custom emojis into this server")
+@app_commands.checks.has_permissions(manage_emojis_and_stickers=True)
+async def steal(i: discord.Interaction, emojis: str):
+    matches = list(CUSTOM_EMOJI.finditer(emojis))
+    if not matches:
+        await i.response.send_message("Send custom emoji mentions, for example `<:party:123456789>`.", ephemeral=True)
+        return
+    await i.response.defer(ephemeral=True)
+    results = []
+    async with aiohttp.ClientSession() as session:
+        for match in matches[:20]:
+            animated, name, emoji_id = match.groups()
+            extension = "gif" if animated else "png"
+            url = f"https://cdn.discordapp.com/emojis/{emoji_id}.{extension}?size=128&quality=lossless"
+            try:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        results.append(f"❌ `{name}`: download failed")
+                        continue
+                    image = await response.read()
+                created = await i.guild.create_custom_emoji(name=name[:32], image=image, reason=f"Stolen by {i.user}")
+                results.append(f"✅ {created} `{name}`")
+            except discord.HTTPException as error:
+                results.append(f"❌ `{name}`: {error.status} (check emoji slots and permissions)")
+            except Exception:
+                results.append(f"❌ `{name}`: failed")
+    await i.followup.send("\n".join(results), ephemeral=True)
 
 
 @bot.tree.error
